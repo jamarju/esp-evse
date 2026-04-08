@@ -1,0 +1,7 @@
+# EV2 Configuration for OpenEVSE
+substitutions:
+  device_name: ev2
+  device_friendly_name: "EV2"
+
+# Include the main configuration file
+<<: !include openevse-tft.yaml 

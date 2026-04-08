@@ -1,0 +1,362 @@
+# Main configuration for OpenEVSE devices
+# This file is included by device-specific configurations (ev1.yaml, ev2.yaml)
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${device_friendly_name}
+  project:
+    name: "esp_evse.firmware"
+    # Firmware version reported to Home Assistant via ESPHome project metadata.
+    # This is bumped by the release workflow, not from pyproject.toml.
+    version: "0.1.0"
+  libraries:
+    - SPI
+    - FS
+    - SPIFFS
+    - TFT_eSPI
+    - NeoPixelBus
+  platformio_options:
+    build_flags: -DUSER_SETUP_LOADED
+      -DILI9488_DRIVER
+      -DTFT_MISO=12
+      -DTFT_MOSI=13
+      -DTFT_SCLK=14
+      -DTFT_CS=15
+      -DTFT_DC=2
+      -DTFT_RST=-1
+      -DTOUCH_CS=33
+      -DTFT_WIDTH=320
+      -DTFT_HEIGHT=480
+      -DSPI_FREQUENCY=40000000
+      -DSPI_READ_FREQUENCY=6000000
+      -DSPI_TOUCH_FREQUENCY=600000
+      -DSMOOTH_FONT
+external_components:
+  - source: components
+    components: [openevse]
+
+esp32:
+  board: esp32dev
+  flash_size: 16MB
+  framework:
+    type: arduino
+    sdkconfig_options:
+      CONFIG_VFS_SUPPORT_DIR: "y"
+      # Keep brownout enabled and pin the lowest ESP32 threshold (~2.43 V).
+      # If the contactor trips this, the real fix is power integrity / EMI.
+      CONFIG_ESP_BROWNOUT_DET: "y"
+      CONFIG_ESP_BROWNOUT_DET_LVL_SEL_0: "y"
+
+debug:
+  update_interval: 5s
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
+
+sensor:
+  - platform: debug
+    free:
+      name: "Heap Free"
+    block:
+      name: "Heap Max Block"
+    loop_time:
+      name: "Loop Time"
+
+# Enable logging but disable serial output
+logger:
+  level: DEBUG
+  baud_rate: 0 # This disables logging over serial
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${device_name} Fallback Hotspot"
+    password: !secret hotspot_password
+
+# Enable Home Assistant API
+api:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+web_server:
+  port: 80
+
+# Configure UART for OpenEVSE communication
+uart:
+  - id: openevse_uart
+    tx_pin: GPIO1
+    rx_pin: GPIO3
+    baud_rate: 115200
+
+# OpenEVSE component — sensors and wiring to template controls
+openevse:
+  id: my_openevse
+  uart_id: openevse_uart
+  update_interval: 10s
+
+  evse_state:
+    name: "EVSE State"
+  pilot_state:
+    name: "Pilot State"
+  elapsed_time:
+    name: "Charging Time"
+  current_capacity:
+    name: "Current Capacity"
+    unit_of_measurement: "A"
+  charging_current:
+    name: "EV Charging Current"
+    unit_of_measurement: "A"
+    accuracy_decimals: 3
+  energy_usage:
+    name: "EV Energy Usage"
+    unit_of_measurement: "kWh"
+    icon: "mdi:lightning-bolt"
+    accuracy_decimals: 1
+  temperature:
+    name: "Internal Temperature"
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    accuracy_decimals: 1
+  firmware_version:
+    name: "Firmware Version"
+    icon: "mdi:information-outline"
+  vehicle_connected:
+    name: "Vehicle Connected"
+    icon: "mdi:ev-plug-type2"
+  charging:
+    name: "Vehicle Charging"
+    icon: "mdi:battery-charging"
+
+  # Wire template entity IDs into C++ component for feedback (publish_state)
+  current_control_id: current_control
+  max_conf_control_id: max_conf_control
+  max_hw_control_id: max_hw_control
+  enable_switch_id: enable_switch
+  current_scale_factor_id: current_scale_factor_control
+  current_offset_id: current_offset_control
+  voltage_control_id: voltage_control
+  backlight_id: backlight_control
+  service_level_select_id: service_level_select
+  front_button_switch_id: front_button_switch
+  diode_check_switch_id: diode_check_switch
+  vent_required_switch_id: vent_required_switch
+  ground_check_switch_id: ground_check_switch
+  stuck_relay_check_switch_id: stuck_relay_check_switch
+  gfi_self_test_switch_id: gfi_self_test_switch
+  temperature_monitoring_switch_id: temperature_monitoring_switch
+
+# Template number controls — lambdas call C++ methods on the OpenEVSE component
+number:
+  - platform: template
+    name: "Set Charging Current"
+    id: current_control
+    unit_of_measurement: "A"
+    min_value: 6
+    max_value: 32
+    step: 1
+    optimistic: false
+    set_action:
+      - lambda: 'id(my_openevse).set_current_capacity(lround(x));'
+
+  - platform: template
+    name: "Set Maximum Configured Current"
+    id: max_conf_control
+    unit_of_measurement: "A"
+    min_value: 6
+    max_value: 50
+    step: 1
+    optimistic: false
+    set_action:
+      - lambda: 'id(my_openevse).set_max_conf_capacity(lround(x));'
+
+  - platform: template
+    name: "Set Max Hardware Current (write-once EEPROM)"
+    id: max_hw_control
+    unit_of_measurement: "A"
+    entity_category: config
+    icon: "mdi:fuse"
+    mode: BOX
+    min_value: 6
+    max_value: 50
+    step: 1
+    optimistic: false
+    set_action:
+      - lambda: 'id(my_openevse).set_max_hw_capacity(lround(x));'
+
+  - platform: template
+    name: "Current Scale Factor"
+    id: current_scale_factor_control
+    mode: BOX
+    min_value: 0
+    max_value: 10000
+    step: 1
+    optimistic: false
+    set_action:
+      - lambda: 'id(my_openevse).set_current_scale_factor(lround(x));'
+
+  - platform: template
+    name: "Current Offset"
+    id: current_offset_control
+    mode: BOX
+    min_value: -10000
+    max_value: 10000
+    step: 1
+    optimistic: false
+    set_action:
+      - lambda: 'id(my_openevse).set_current_offset(lround(x));'
+
+  - platform: template
+    name: "Set Voltage"
+    id: voltage_control
+    icon: "mdi:flash"
+    unit_of_measurement: "V"
+    mode: BOX
+    min_value: 100
+    max_value: 250
+    step: 1
+    optimistic: false
+    set_action:
+      - lambda: 'id(my_openevse).set_voltage(x);'
+
+  - platform: template
+    name: "Display Brightness"
+    id: backlight_control
+    icon: "mdi:brightness-6"
+    unit_of_measurement: "%"
+    mode: SLIDER
+    min_value: 10
+    max_value: 100
+    step: 10
+    optimistic: true
+    restore_value: true
+    initial_value: 100
+    set_action:
+      - lambda: 'id(my_openevse).set_backlight_brightness(x);'
+
+select:
+  - platform: template
+    name: "Service Level"
+    id: service_level_select
+    entity_category: config
+    icon: "mdi:transmission-tower"
+    options:
+      - "L1"
+      - "L2"
+      - "Auto"
+    optimistic: false
+    set_action:
+      - lambda: 'id(my_openevse).set_service_level(x);'
+
+switch:
+  - platform: template
+    name: "Dark Mode"
+    id: dark_mode_switch
+    icon: "mdi:theme-light-dark"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - lambda: 'id(my_openevse).set_dark_mode(true);'
+    on_turn_off:
+      - lambda: 'id(my_openevse).set_dark_mode(false);'
+
+  - platform: template
+    name: "EVSE Enable"
+    id: enable_switch
+    icon: "mdi:ev-station"
+    optimistic: false
+    turn_on_action:
+      - lambda: 'id(my_openevse).enable_evse(true);'
+    turn_off_action:
+      - lambda: 'id(my_openevse).enable_evse(false);'
+
+  - platform: template
+    name: "Front Panel Button"
+    id: front_button_switch
+    entity_category: config
+    icon: "mdi:gesture-tap-button"
+    optimistic: false
+    turn_on_action:
+      - lambda: "id(my_openevse).set_feature_enabled('B', true);"
+    turn_off_action:
+      - lambda: "id(my_openevse).set_feature_enabled('B', false);"
+
+  - platform: template
+    name: "Diode Check"
+    id: diode_check_switch
+    entity_category: config
+    icon: "mdi:diode"
+    optimistic: false
+    turn_on_action:
+      - lambda: "id(my_openevse).set_feature_enabled('D', true);"
+    turn_off_action:
+      - lambda: "id(my_openevse).set_feature_enabled('D', false);"
+
+  - platform: template
+    name: "Vent Required Check"
+    id: vent_required_switch
+    entity_category: config
+    icon: "mdi:fan-alert"
+    optimistic: false
+    turn_on_action:
+      - lambda: "id(my_openevse).set_feature_enabled('V', true);"
+    turn_off_action:
+      - lambda: "id(my_openevse).set_feature_enabled('V', false);"
+
+  - platform: template
+    name: "Ground Check"
+    id: ground_check_switch
+    entity_category: config
+    icon: "mdi:earth"
+    optimistic: false
+    turn_on_action:
+      - lambda: "id(my_openevse).set_feature_enabled('G', true);"
+    turn_off_action:
+      - lambda: "id(my_openevse).set_feature_enabled('G', false);"
+
+  - platform: template
+    name: "Stuck Relay Check"
+    id: stuck_relay_check_switch
+    entity_category: config
+    icon: "mdi:car-brake-alert"
+    optimistic: false
+    turn_on_action:
+      - lambda: "id(my_openevse).set_feature_enabled('R', true);"
+    turn_off_action:
+      - lambda: "id(my_openevse).set_feature_enabled('R', false);"
+
+  - platform: template
+    name: "GFI Self-Test"
+    id: gfi_self_test_switch
+    entity_category: config
+    icon: "mdi:lightning-bolt-circle"
+    optimistic: false
+    turn_on_action:
+      - lambda: "id(my_openevse).set_feature_enabled('F', true);"
+    turn_off_action:
+      - lambda: "id(my_openevse).set_feature_enabled('F', false);"
+
+  - platform: template
+    name: "Temperature Monitoring"
+    id: temperature_monitoring_switch
+    entity_category: config
+    icon: "mdi:thermometer-check"
+    optimistic: false
+    turn_on_action:
+      - lambda: "id(my_openevse).set_feature_enabled('T', true);"
+    turn_off_action:
+      - lambda: "id(my_openevse).set_feature_enabled('T', false);"
+
+button:
+  - platform: template
+    name: "SPI Read Test"
+    on_press:
+      - lambda: 'id(my_openevse).debug_spi_read();'

@@ -1,0 +1,18 @@
+[project]
+name = "esp-evse"
+version = "0.1.0"
+description = "ESPHome-based firmware for OpenEVSE electric vehicle chargers with seamless Home Assistant integration"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "altair>=6.0.0",
+    "esphome",
+    "fatfs-ng>=0.1.15",
+    "littlefs-python>=0.17.1",
+    "marimo>=0.22.4",
+    "numpy>=2.4.4",
+    "polars>=1.39.3",
+]
+
+[tool.uv]
+package = false

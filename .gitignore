@@ -1,0 +1,13 @@
+/.esphome/
+**/.pioenvs/
+**/.piolibdeps/
+**/lib/
+**/src/
+**/platformio.ini
+/secrets.yaml
+/.platformio/
+/.claude/
+/__marimo__/
+.DS_Store
+*.pyc
+/tmp
