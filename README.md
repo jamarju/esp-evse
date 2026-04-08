@@ -75,7 +75,7 @@ uv run esphome run ev1.yaml --device /dev/cu.usbserial-XXXXX
 
 ## Flash via Wi-Fi
 
-After the esphome has been flashed at least once you can flash over-the-air:
+Once the board has been flashed over serial at least once, you can update it over Wi-Fi:
 
 ```sh
 # Compile and flash over USB
@@ -95,19 +95,17 @@ export PLATFORMIO_CORE_DIR=$(pwd)/.platformio
 ```
 
 
-The firmware version reported to Home Assistant lives directly in [openevse-tft.yaml](openevse-tft.yaml). `uv run esphome ...` is the stock ESPHome CLI again; `pyproject.toml` is only used for the local tooling environment.
-
 ## Ammeter Calibration
 
-Launch the calibration notebook as a read-only app:
+To calibrate the ammeter, you need a clamp ammeter to measure charging current directly. If your car reports charging power instead of amps, you can estimate current by dividing power by your grid voltage.
+
+Launch the calibration notebook:
 
 ```sh
 uv run marimo run scripts/calibration.py
 ```
 
-This opens the notebook in app mode, not in the editor. It shows an editable table, the calculated `scale_factor` / `offset`, and a live plot.
-
-Measurement flow:
+Calibration instructions:
 
 - In Home Assistant, find the number entities named `Current Scale Factor` and `Current Offset`, and enter those current values into the first two inputs in the app
 - Put a clamp meter around either live or neutral
@@ -115,6 +113,7 @@ Measurement flow:
 - In the table, add one row per measurement pair
 - Enter `reported_A` from the `EV Charging Current` sensor in Home Assistant and `measured_A` from the clamp meter
 - As you type, the regression reruns and the results update automatically
+- The resulting `offset` and `scale_factor` values are the new values to write back into the `Current Offset` and `Current Scale Factor` entities in Home Assistant
 
 The plot shows `x = reported current`, `y = measured current`, and the dashed line is the regression fit.
 
