@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <sstream>
 #include <cmath>
@@ -22,10 +24,26 @@ namespace openevse {
 static const char *TAG = "openevse";
 static const uint32_t COMMAND_TIMEOUT = 2000;
 
+std::string trim_copy(std::string value) {
+  auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) { return std::isspace(c) != 0; });
+  auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) { return std::isspace(c) != 0; }).base();
+  if (first >= last) {
+    return {};
+  }
+
+  return std::string(first, last);
+}
+
 // OpenEVSE implementation
 void OpenEVSE::setup() {
   // Reserve space for response
   this->response_.reserve(128);
+  this->pending_raw_command_.reserve(64);
+  this->controls_ready_ = false;
+  this->publish_rapi_status_("idle");
+  if (this->raw_command_input_ != nullptr) {
+    this->raw_command_input_->publish_state("");
+  }
 
   // Log initial memory usage information
   // We'll use the debug component instead
@@ -108,9 +126,16 @@ void OpenEVSE::loop() {
   // Clear queue if no responses for too long
   if (!this->command_.empty() && now - this->last_command_time_ > COMMAND_TIMEOUT) {
     ESP_LOGW(TAG, "Command timed out after %d ms, clearing command queue", COMMAND_TIMEOUT);
-    std::queue<std::string> empty;
+    if (this->current_request_.capture_response) {
+      if (this->rapi_response_sensor_ != nullptr) {
+        this->rapi_response_sensor_->publish_state("Timeout");
+      }
+      this->publish_rapi_status_("timeout");
+    }
+    std::deque<QueuedCommand> empty;
     std::swap(this->command_queue_, empty);
     this->command_.clear();
+    this->current_request_ = {};
   }
 
   // Check for incoming messages
@@ -131,6 +156,7 @@ void OpenEVSE::loop() {
       this->update_display();
       // Clear current command and process the next one in the queue
       this->command_.clear();
+      this->current_request_ = {};
       this->send_next_command_in_queue_();
     }
   }
@@ -282,21 +308,27 @@ void OpenEVSE::update() {
 }
 
 // Send command and add to queue if needed
-void OpenEVSE::queue_command_(const std::string &command) {
+bool OpenEVSE::queue_command_(const std::string &command, bool capture_response, bool priority) {
   // Add command to queue
   if (this->command_queue_.size() >= MAX_QUEUE_SIZE) {
     ESP_LOGW(TAG, "Command queue full, dropping command: %s", command.c_str());
-    return;
+    return false;
   }
-  
-  // Add to queue
-  this->command_queue_.push(command);
+
+  QueuedCommand queued_command{command, capture_response};
+  if (priority) {
+    this->command_queue_.push_front(queued_command);
+  } else {
+    this->command_queue_.push_back(queued_command);
+  }
   ESP_LOGD(TAG, "Command queued: %s (queue size: %d)", command.c_str(), this->command_queue_.size());
-  
+
   // If no command is in progress, send the next command in the queue
   if (this->command_.empty()) {
     this->send_next_command_in_queue_();
   }
+
+  return true;
 }
 
 // Send the next command in the queue
@@ -311,11 +343,11 @@ void OpenEVSE::send_next_command_in_queue_() {
   }
   
   // Get the next command from the queue
-  std::string command = this->command_queue_.front();
-  this->command_queue_.pop();
+  this->current_request_ = this->command_queue_.front();
+  this->command_queue_.pop_front();
   
   // Format: $command^checksum
-  std::string payload = "$" + command;
+  std::string payload = "$" + this->current_request_.command;
   std::string checksum = this->calculate_checksum_(payload);
   this->command_ = payload + "^" + checksum + "\r";
 
@@ -323,6 +355,9 @@ void OpenEVSE::send_next_command_in_queue_() {
   ESP_LOGD(TAG, ">>> %s", this->command_.c_str());
   this->uart_parent_->write_str(this->command_.c_str());
   this->last_command_time_ = millis();
+  if (this->current_request_.capture_response) {
+    this->publish_rapi_status_("sent");
+  }
 }
 
 std::string OpenEVSE::calculate_checksum_(const std::string &data) {
@@ -401,7 +436,72 @@ void OpenEVSE::update_feature_switches_(uint16_t flags) {
   }
 }
 
+void OpenEVSE::publish_rapi_status_(const std::string &status) {
+  if (this->rapi_status_sensor_ != nullptr) {
+    this->rapi_status_sensor_->publish_state(status);
+  }
+}
+
+bool OpenEVSE::control_writes_ready_() const {
+  if (this->controls_ready_) {
+    return true;
+  }
+
+  ESP_LOGD(TAG, "Ignoring control write before initial settings sync");
+  return false;
+}
+
+std::string OpenEVSE::normalize_raw_command_(const std::string &command) const {
+  std::string normalized = trim_copy(command);
+  normalized.erase(std::remove(normalized.begin(), normalized.end(), '\r'), normalized.end());
+  normalized.erase(std::remove(normalized.begin(), normalized.end(), '\n'), normalized.end());
+  normalized = trim_copy(normalized);
+
+  if (!normalized.empty() && normalized.front() == '$') {
+    normalized.erase(0, 1);
+  }
+
+  size_t checksum_pos = normalized.find('^');
+  if (checksum_pos != std::string::npos) {
+    normalized.erase(checksum_pos);
+  }
+
+  return trim_copy(normalized);
+}
+
+void OpenEVSE::set_raw_command(const std::string &command) {
+  this->pending_raw_command_ = this->normalize_raw_command_(command);
+}
+
+void OpenEVSE::send_raw_command() {
+  const std::string command = this->normalize_raw_command_(this->pending_raw_command_);
+  if (command.empty()) {
+    if (this->rapi_response_sensor_ != nullptr) {
+      this->rapi_response_sensor_->publish_state("Empty command");
+    }
+    this->publish_rapi_status_("invalid");
+    return;
+  }
+
+  this->pending_raw_command_ = command;
+  if (this->rapi_response_sensor_ != nullptr) {
+    this->rapi_response_sensor_->publish_state("");
+  }
+  this->publish_rapi_status_("queued");
+
+  if (!this->queue_command_(command, true, true)) {
+    if (this->rapi_response_sensor_ != nullptr) {
+      this->rapi_response_sensor_->publish_state("Queue full");
+    }
+    this->publish_rapi_status_("queue_full");
+  }
+}
+
 void OpenEVSE::set_current_capacity(float amps) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   int amps_int = std::lround(amps);
 
   // Format command: SC amps V
@@ -410,6 +510,10 @@ void OpenEVSE::set_current_capacity(float amps) {
 }
 
 void OpenEVSE::set_max_conf_capacity(float amps) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   int amps_int = std::lround(amps);
   
   // Format command: SC amps
@@ -418,6 +522,10 @@ void OpenEVSE::set_max_conf_capacity(float amps) {
 }
 
 void OpenEVSE::set_max_hw_capacity(float amps) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   int amps_int = std::lround(amps);
   
   // Format command: SC amps M
@@ -426,6 +534,10 @@ void OpenEVSE::set_max_hw_capacity(float amps) {
 }
 
 void OpenEVSE::set_current_scale_factor(float scale_factor) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   int scale_factor_int = std::lround(scale_factor);
   
   // Get the current offset to include in the command
@@ -441,6 +553,10 @@ void OpenEVSE::set_current_scale_factor(float scale_factor) {
 }
 
 void OpenEVSE::set_current_offset(float offset) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   int offset_int = this->encode_ammeter_offset_for_rapi_(std::lround(offset));
   
   // Get the current scale factor to include in the command
@@ -456,6 +572,10 @@ void OpenEVSE::set_current_offset(float offset) {
 }
 
 void OpenEVSE::set_voltage(float volts) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   // Convert to integer millivolts
   int mv = std::lround(volts * 1000.0);
   
@@ -470,6 +590,10 @@ void OpenEVSE::set_voltage(float volts) {
 }
 
 void OpenEVSE::set_service_level(const std::string &service_level) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   char service_level_code;
 
   if (service_level == "L1") {
@@ -489,6 +613,10 @@ void OpenEVSE::set_service_level(const std::string &service_level) {
 }
 
 void OpenEVSE::set_feature_enabled(char feature_id, bool enabled) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   std::string command = "FF ";
   command.push_back(feature_id);
   command += enabled ? " 1" : " 0";
@@ -496,6 +624,10 @@ void OpenEVSE::set_feature_enabled(char feature_id, bool enabled) {
 }
 
 void OpenEVSE::enable_evse(bool enable) {
+  if (!this->control_writes_ready_()) {
+    return;
+  }
+
   if (enable) {
     this->queue_command_("FE"); // Enable EVSE
   } else {
@@ -566,11 +698,8 @@ void OpenEVSE::update_state_sensors_(uint8_t evse_state, uint8_t pilot_state, ui
 }
 
 void OpenEVSE::handle_response_(const std::string &response) {
-  std::string cmd = this->command_.substr(1, 2);
-  size_t checksum_pos = this->command_.find('^');
-  std::string current_command = checksum_pos == std::string::npos
-                                  ? this->command_
-                                  : this->command_.substr(1, checksum_pos - 1);
+  const std::string current_command = this->current_request_.command;
+  const std::string cmd = current_command.substr(0, std::min<size_t>(2, current_command.size()));
 
   // Tokenize the response by splitting on spaces
   std::vector<std::string> tokens;
@@ -579,6 +708,20 @@ void OpenEVSE::handle_response_(const std::string &response) {
   
   while (ss >> token) {
     tokens.push_back(token);
+  }
+
+  if (this->current_request_.capture_response) {
+    if (this->rapi_response_sensor_ != nullptr) {
+      this->rapi_response_sensor_->publish_state(response);
+    }
+
+    if (!tokens.empty() && tokens[0] == "$OK") {
+      this->publish_rapi_status_("ok");
+    } else if (!tokens.empty() && tokens[0] == "$NK") {
+      this->publish_rapi_status_("nk");
+    } else {
+      this->publish_rapi_status_("response");
+    }
   }
   
   if (cmd == "GS") {
@@ -695,9 +838,17 @@ void OpenEVSE::handle_response_(const std::string &response) {
     if (this->service_level_select_ != nullptr) {
       this->service_level_select_->publish_state(service_level);
     }
+    if (this->settings_flags_sensor_ != nullptr) {
+      this->settings_flags_sensor_->publish_state(tokens[2]);
+    }
     this->update_feature_switches_(flags);
+    if (!this->controls_ready_) {
+      this->controls_ready_ = true;
+      ESP_LOGI(TAG, "Initial settings sync complete; control writes enabled");
+    }
 
-    ESP_LOGD(TAG, "Settings: Current=%d A, Flags=0x%04X, Service Level=%s", amps, flags, service_level.c_str());
+    ESP_LOGD(TAG, "Settings: Current=%d A, Flags(raw)=%s, Flags(parsed)=0x%04X, Service Level=%s",
+             amps, tokens[2].c_str(), flags, service_level.c_str());
   } else if (cmd == "GA") {
     // Format: $OK currentscalefactor currentoffset
     if (tokens.size() != 3) {
@@ -862,7 +1013,11 @@ void OpenEVSE::handle_response_(const std::string &response) {
       ESP_LOGW(TAG, "Invalid response for $GV: %s", response.c_str());
     }
   } else {
-    ESP_LOGW(TAG, "Unhandled response: %s", response.c_str());
+    if (this->current_request_.capture_response) {
+      ESP_LOGD(TAG, "Raw command response: %s -> %s", current_command.c_str(), response.c_str());
+    } else {
+      ESP_LOGW(TAG, "Unhandled response: %s", response.c_str());
+    }
   }
   
 }
@@ -1114,46 +1269,6 @@ esp_err_t OpenEVSE::handle_screenshot(httpd_req_t *req) {
   httpd_resp_send_chunk(req, NULL, 0);
   ESP_LOGI(TAG, "Screenshot served (%u bytes)", FILE_SIZE);
   return ESP_OK;
-}
-
-void OpenEVSE::debug_spi_read() {
-  ESP_LOGW(TAG, "=== SPI Read Diagnostic (6 MHz) ===");
-
-  // Test 1: readRect returns RGB565 — read 4x4 from top-left
-  uint16_t buf[16];
-  this->tft.readRect(0, 0, 4, 4, buf);
-  ESP_LOGW(TAG, "readRect 4x4 @ (0,0):");
-  for (int y = 0; y < 4; y++) {
-    ESP_LOGW(TAG, "  row %d: %04X %04X %04X %04X",
-             y, buf[y * 4], buf[y * 4 + 1], buf[y * 4 + 2], buf[y * 4 + 3]);
-  }
-
-  // Test 2: readRect from center (likely has non-black content)
-  this->tft.readRect(240, 160, 4, 4, buf);
-  ESP_LOGW(TAG, "readRect 4x4 @ (240,160):");
-  for (int y = 0; y < 4; y++) {
-    ESP_LOGW(TAG, "  row %d: %04X %04X %04X %04X",
-             y, buf[y * 4], buf[y * 4 + 1], buf[y * 4 + 2], buf[y * 4 + 3]);
-  }
-
-  // Test 3: readRectRGB returns raw RGB888 — bypasses RGB565 conversion
-  // This tells us if the ILI9488 18-bit read path works even if color565() mangles it
-  uint8_t rgb[12];  // 4 pixels x 3 bytes
-  this->tft.readRectRGB(0, 0, 4, 1, rgb);
-  ESP_LOGW(TAG, "readRectRGB 4x1 @ (0,0) raw RGB888:");
-  for (int i = 0; i < 4; i++) {
-    ESP_LOGW(TAG, "  px%d: R=0x%02X G=0x%02X B=0x%02X",
-             i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
-  }
-
-  // Test 4: readPixel — single pixel reads at a few known spots
-  uint16_t px0 = this->tft.readPixel(0, 0);
-  uint16_t px_center = this->tft.readPixel(240, 160);
-  uint16_t px_corner = this->tft.readPixel(479, 319);
-  ESP_LOGW(TAG, "readPixel: (0,0)=%04X  (240,160)=%04X  (479,319)=%04X",
-           px0, px_center, px_corner);
-
-  ESP_LOGW(TAG, "=== SPI Read Diagnostic Done ===");
 }
 
 }  // namespace openevse

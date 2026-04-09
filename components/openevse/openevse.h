@@ -1,6 +1,6 @@
 #pragma once
 
-#include <queue>
+#include <deque>
 #include <string>
 #include <limits>
 #include "TFT_eSPI.h"
@@ -11,6 +11,7 @@
 #include "esphome/components/number/number.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/select/select.h"
+#include "esphome/components/text/text.h"
 #include "evse_display.h"
 #include <NeoPixelBus.h>
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -64,6 +65,9 @@ class OpenEVSE : public Component {
   bool get_dark_mode() const { return this->dark_mode_; }
   void set_backlight_brightness(float pct);
   void set_backlight_control(number::Number *n) { this->backlight_control_ = n; }
+  void set_raw_command_input(text::Text *t) { this->raw_command_input_ = t; }
+  void set_raw_command(const std::string &command);
+  void send_raw_command();
 
   // Sensors
   void set_evse_state_sensor(text_sensor::TextSensor *s) { this->evse_state_sensor_ = s; }
@@ -74,6 +78,9 @@ class OpenEVSE : public Component {
   void set_temperature_sensor(sensor::Sensor *s) { this->temperature_sensor_ = s; }
   void set_energy_usage_sensor(sensor::Sensor *s) { this->energy_usage_sensor_ = s; }
   void set_firmware_version_sensor(text_sensor::TextSensor *s) { this->firmware_version_sensor_ = s; }
+  void set_settings_flags_sensor(text_sensor::TextSensor *s) { this->settings_flags_sensor_ = s; }
+  void set_rapi_response_sensor(text_sensor::TextSensor *s) { this->rapi_response_sensor_ = s; }
+  void set_rapi_status_sensor(text_sensor::TextSensor *s) { this->rapi_status_sensor_ = s; }
 
   // Controls (wired from template entities via Python codegen)
   void set_current_capacity_control(number::Number *n) { this->current_capacity_control_ = n; }
@@ -117,9 +124,6 @@ class OpenEVSE : public Component {
   // Memory debugging
   void log_memory_usage(const char* location);
 
-  // SPI read diagnostic
-  void debug_spi_read();
-
   // Screenshot HTTP endpoint (port 8080)
   static esp_err_t handle_screenshot_static(httpd_req_t *req);
   esp_err_t handle_screenshot(httpd_req_t *req);
@@ -137,14 +141,22 @@ class OpenEVSE : public Component {
     ENABLE_EVSE,           // FE
     DISABLE_EVSE           // FD
   };
+
+  struct QueuedCommand {
+    std::string command;
+    bool capture_response{false};
+  };
   
-  void queue_command_(const std::string &command);
+  bool queue_command_(const std::string &command, bool capture_response = false, bool priority = false);
   void handle_response_(const std::string &response);
   std::string calculate_checksum_(const std::string &data);
   std::string parse_state_text_(uint8_t state);
   int encode_ammeter_offset_for_rapi_(int offset);
   std::string parse_service_level_(uint16_t flags);
   void update_feature_switches_(uint16_t flags);
+  void publish_rapi_status_(const std::string &status);
+  std::string normalize_raw_command_(const std::string &command) const;
+  bool control_writes_ready_() const;
   bool read_line_();
   std::string parse_response_();
   text_sensor::TextSensor *evse_state_sensor_{nullptr};
@@ -184,8 +196,11 @@ class OpenEVSE : public Component {
   CommandType in_flight_command_{CommandType::NONE};
   
   // Add to the protected section of the OpenEVSE class
-  std::queue<std::string> command_queue_;
+  std::deque<QueuedCommand> command_queue_;
   static const size_t MAX_QUEUE_SIZE = 16;
+  QueuedCommand current_request_{};
+  std::string pending_raw_command_;
+  text::Text *raw_command_input_{nullptr};
   
   void send_next_command_in_queue_();
   float energy_usage_kwh_{std::numeric_limits<float>::quiet_NaN()};
@@ -210,6 +225,10 @@ class OpenEVSE : public Component {
   StartupPhase startup_phase_{StartupPhase::INIT};
   std::string firmware_version_;
   text_sensor::TextSensor *firmware_version_sensor_{nullptr};
+  text_sensor::TextSensor *settings_flags_sensor_{nullptr};
+  text_sensor::TextSensor *rapi_response_sensor_{nullptr};
+  text_sensor::TextSensor *rapi_status_sensor_{nullptr};
+  bool controls_ready_{false};
 
   // Binary sensors
   binary_sensor::BinarySensor *vehicle_connected_sensor_{nullptr};

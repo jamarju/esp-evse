@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import uart, sensor, text_sensor, number, switch, binary_sensor, select
+from esphome.components import uart, sensor, text_sensor, number, switch, binary_sensor, select, text
 from esphome.const import (
     CONF_ID,
     CONF_UPDATE_INTERVAL,
@@ -35,6 +35,10 @@ CONF_CHARGING_CURRENT = "charging_current"
 CONF_TEMPERATURE = "temperature"
 CONF_ENERGY_USAGE = "energy_usage"
 CONF_FIRMWARE_VERSION = "firmware_version"
+CONF_SETTINGS_FLAGS = "settings_flags"
+CONF_RAPI_RESPONSE = "rapi_response"
+CONF_RAPI_STATUS = "rapi_status"
+CONF_RAW_COMMAND_TEXT_ID = "raw_command_text_id"
 CONF_VEHICLE_CONNECTED = "vehicle_connected"
 CONF_CHARGING = "charging"
 
@@ -101,6 +105,18 @@ CONFIG_SCHEMA = (
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
                 icon="mdi:information-outline"
             ),
+            cv.Optional(CONF_SETTINGS_FLAGS): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:form-textbox"
+            ),
+            cv.Optional(CONF_RAPI_RESPONSE): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:console-line"
+            ),
+            cv.Optional(CONF_RAPI_STATUS): text_sensor.text_sensor_schema(
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                icon="mdi:list-status"
+            ),
             cv.Optional(CONF_VEHICLE_CONNECTED): binary_sensor.binary_sensor_schema(
                 icon="mdi:ev-plug-type2"
             ),
@@ -124,6 +140,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_STUCK_RELAY_CHECK_SWITCH_ID): cv.use_id(switch.Switch),
             cv.Optional(CONF_GFI_SELF_TEST_SWITCH_ID): cv.use_id(switch.Switch),
             cv.Optional(CONF_TEMPERATURE_MONITORING_SWITCH_ID): cv.use_id(switch.Switch),
+            cv.Optional(CONF_RAW_COMMAND_TEXT_ID): cv.use_id(text.Text),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -146,6 +163,9 @@ async def to_code(config):
         (CONF_EVSE_STATE, "set_evse_state_sensor"),
         (CONF_PILOT_STATE, "set_pilot_state_sensor"),
         (CONF_FIRMWARE_VERSION, "set_firmware_version_sensor"),
+        (CONF_SETTINGS_FLAGS, "set_settings_flags_sensor"),
+        (CONF_RAPI_RESPONSE, "set_rapi_response_sensor"),
+        (CONF_RAPI_STATUS, "set_rapi_status_sensor"),
     ]:
         if conf_key in config:
             sens = await text_sensor.new_text_sensor(config[conf_key])
@@ -179,6 +199,7 @@ async def to_code(config):
         (CONF_CURRENT_OFFSET_ID, "set_current_offset_control"),
         (CONF_VOLTAGE_CONTROL_ID, "set_voltage_control"),
         (CONF_BACKLIGHT_ID, "set_backlight_control"),
+        (CONF_RAW_COMMAND_TEXT_ID, "set_raw_command_input"),
         (CONF_SERVICE_LEVEL_SELECT_ID, "set_service_level_select"),
         (CONF_FRONT_BUTTON_SWITCH_ID, "set_front_button_switch"),
         (CONF_DIODE_CHECK_SWITCH_ID, "set_diode_check_switch"),

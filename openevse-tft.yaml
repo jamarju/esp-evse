@@ -51,11 +51,36 @@ debug:
   update_interval: 5s
 
 text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+    hide_hash: true
+    hide_timestamp: true
+
   - platform: debug
     device:
       name: "Device Info"
     reset_reason:
       name: "Reset Reason"
+
+text:
+  - platform: template
+    name: "RAPI Command"
+    id: rapi_command_input
+    entity_category: config
+    mode: TEXT
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    set_action:
+      - lambda: 'id(my_openevse).set_raw_command(x);'
+
+button:
+  - platform: template
+    name: "Send RAPI Command"
+    icon: "mdi:console-line"
+    entity_category: config
+    on_press:
+      - lambda: 'id(my_openevse).send_raw_command();'
 
 sensor:
   - platform: debug
@@ -127,8 +152,17 @@ openevse:
     icon: "mdi:thermometer"
     accuracy_decimals: 1
   firmware_version:
-    name: "Firmware Version"
+    name: "OpenEVSE Controller Version"
     icon: "mdi:information-outline"
+  settings_flags:
+    name: "OpenEVSE Settings Flags"
+    icon: "mdi:form-textbox"
+  rapi_response:
+    name: "RAPI Last Response"
+    icon: "mdi:console-line"
+  rapi_status:
+    name: "RAPI Status"
+    icon: "mdi:list-status"
   vehicle_connected:
     name: "Vehicle Connected"
     icon: "mdi:ev-plug-type2"
@@ -145,6 +179,7 @@ openevse:
   current_offset_id: current_offset_control
   voltage_control_id: voltage_control
   backlight_id: backlight_control
+  raw_command_text_id: rapi_command_input
   service_level_select_id: service_level_select
   front_button_switch_id: front_button_switch
   diode_check_switch_id: diode_check_switch
@@ -186,7 +221,7 @@ number:
     icon: "mdi:fuse"
     mode: BOX
     min_value: 6
-    max_value: 50
+    max_value: 80
     step: 1
     optimistic: false
     set_action:
@@ -273,90 +308,92 @@ switch:
     id: enable_switch
     icon: "mdi:ev-station"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: 'id(my_openevse).enable_evse(true);'
     turn_off_action:
       - lambda: 'id(my_openevse).enable_evse(false);'
 
   - platform: template
-    name: "Front Panel Button"
+    name: "Front Panel Button Enabled"
     id: front_button_switch
     entity_category: config
     icon: "mdi:gesture-tap-button"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: "id(my_openevse).set_feature_enabled('B', true);"
     turn_off_action:
       - lambda: "id(my_openevse).set_feature_enabled('B', false);"
 
   - platform: template
-    name: "Diode Check"
+    name: "Diode Check Enabled"
     id: diode_check_switch
     entity_category: config
     icon: "mdi:diode"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: "id(my_openevse).set_feature_enabled('D', true);"
     turn_off_action:
       - lambda: "id(my_openevse).set_feature_enabled('D', false);"
 
   - platform: template
-    name: "Vent Required Check"
+    name: "Vent Required Check Enabled"
     id: vent_required_switch
     entity_category: config
     icon: "mdi:fan-alert"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: "id(my_openevse).set_feature_enabled('V', true);"
     turn_off_action:
       - lambda: "id(my_openevse).set_feature_enabled('V', false);"
 
   - platform: template
-    name: "Ground Check"
+    name: "Ground Check Enabled"
     id: ground_check_switch
     entity_category: config
     icon: "mdi:earth"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: "id(my_openevse).set_feature_enabled('G', true);"
     turn_off_action:
       - lambda: "id(my_openevse).set_feature_enabled('G', false);"
 
   - platform: template
-    name: "Stuck Relay Check"
+    name: "Stuck Relay Check Enabled"
     id: stuck_relay_check_switch
     entity_category: config
     icon: "mdi:car-brake-alert"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: "id(my_openevse).set_feature_enabled('R', true);"
     turn_off_action:
       - lambda: "id(my_openevse).set_feature_enabled('R', false);"
 
   - platform: template
-    name: "GFI Self-Test"
+    name: "GFI Self-Test Enabled"
     id: gfi_self_test_switch
     entity_category: config
     icon: "mdi:lightning-bolt-circle"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: "id(my_openevse).set_feature_enabled('F', true);"
     turn_off_action:
       - lambda: "id(my_openevse).set_feature_enabled('F', false);"
 
   - platform: template
-    name: "Temperature Monitoring"
+    name: "Temperature Monitoring Enabled"
     id: temperature_monitoring_switch
     entity_category: config
     icon: "mdi:thermometer-check"
     optimistic: false
+    restore_mode: DISABLED
     turn_on_action:
       - lambda: "id(my_openevse).set_feature_enabled('T', true);"
     turn_off_action:
       - lambda: "id(my_openevse).set_feature_enabled('T', false);"
-
-button:
-  - platform: template
-    name: "SPI Read Test"
-    on_press:
-      - lambda: 'id(my_openevse).debug_spi_read();'
