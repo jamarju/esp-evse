@@ -8,7 +8,7 @@ esphome:
     name: "esp_evse.firmware"
     # Firmware version reported to Home Assistant via ESPHome project metadata.
     # This is bumped by the release workflow, not from pyproject.toml.
-    version: "0.1.0"
+    version: "0.2.0"
   libraries:
     - SPI
     - FS
