@@ -186,7 +186,8 @@ void EvseDisplay::begin(bool dark) {
 
 uint32_t EvseDisplay::update(EvseState state, float setpoint_a, float current_a,
                              float voltage_v, float power_kw, float session_kwh,
-                             uint32_t elapsed_s, bool dark) {
+                             uint32_t elapsed_s, MainPanelMode panel_mode,
+                             bool dark) {
   bool theme_changed = (dark != last_dark_);
   last_dark_ = dark;
   theme_ = dark ? &DARK : &LIGHT;
@@ -200,7 +201,7 @@ uint32_t EvseDisplay::update(EvseState state, float setpoint_a, float current_a,
 
   uint32_t t0 = micros();
   draw_dynamic(state, setpoint_a, current_a, voltage_v, power_kw,
-               session_kwh, elapsed_s);
+               session_kwh, elapsed_s, panel_mode);
   return micros() - t0;
 }
 
@@ -209,7 +210,8 @@ uint32_t EvseDisplay::update(EvseState state, float setpoint_a, float current_a,
 bool EvseDisplay::render_band(TFT_eSprite &sprite, int16_t band_y,
                               EvseState state, float setpoint_a, float current_a,
                               float voltage_v, float power_kw, float session_kwh,
-                              uint32_t elapsed_s, bool dark) {
+                              uint32_t elapsed_s, MainPanelMode panel_mode,
+                              bool dark) {
   int16_t band_h = std::min((int16_t)SCREENSHOT_BAND_H, (int16_t)(h_ - band_y));
   if (band_h <= 0) return false;
 
@@ -240,7 +242,7 @@ bool EvseDisplay::render_band(TFT_eSprite &sprite, int16_t band_y,
 
   ESP_LOGW(DTAG, "band y=%d: draw_dynamic", band_y);
   draw_dynamic(state, setpoint_a, current_a, voltage_v, power_kw,
-               session_kwh, elapsed_s);
+               session_kwh, elapsed_s, panel_mode);
 
   ESP_LOGW(DTAG, "band y=%d: done, restoring", band_y);
 
@@ -300,7 +302,8 @@ void EvseDisplay::draw_static_labels() {
 
 void EvseDisplay::draw_dynamic(EvseState state, float setpoint_a, float current_a,
                                float voltage_v, float power_kw,
-                               float session_kwh, uint32_t elapsed_s) {
+                               float session_kwh, uint32_t elapsed_s,
+                               MainPanelMode panel_mode) {
   const auto &t = *theme_;
   char buf[32];
   uint16_t sc = state_color(state);
@@ -360,8 +363,19 @@ void EvseDisplay::draw_dynamic(EvseState state, float setpoint_a, float current_
     tft_->setTextDatum(MC_DATUM);
     tft_->setTextPadding(w_ - 4 * pad_);
     tft_->setTextColor(t.text, t.panel);
-    sprintf(buf, "%d A", (int)setpoint_a);
-    tft_->drawString(buf, panel_cx_, panel_cy_);
+    switch (panel_mode) {
+      case PANEL_SURPLUS_WAIT:
+        tft_->drawString(ICON_MOON, panel_cx_, panel_cy_);
+        break;
+      case PANEL_VEHICLE_PAUSED:
+        tft_->drawString(ICON_BATTERY, panel_cx_, panel_cy_);
+        break;
+      case PANEL_SETPOINT:
+      default:
+        sprintf(buf, "%d A", (int)setpoint_a);
+        tft_->drawString(buf, panel_cx_, panel_cy_);
+        break;
+    }
     tft_->unloadFont();
   }
 }

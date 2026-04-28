@@ -23,6 +23,7 @@ namespace openevse {
 
 static const char *TAG = "openevse";
 static const uint32_t COMMAND_TIMEOUT = 2000;
+static const TickType_t LED_TASK_PERIOD_TICKS = pdMS_TO_TICKS(40);
 
 std::string trim_copy(std::string value) {
   auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) { return std::isspace(c) != 0; });
@@ -68,7 +69,8 @@ void OpenEVSE::setup() {
   if (this->display_) {
     this->display_->set_fonts(font_big, font_medium, font_small);
     this->display_->begin(this->dark_mode_);
-    this->display_->update(evse_display::STATE_STARTING, 0, 0, 0, 0, 0, 0, this->dark_mode_);
+    this->display_->update(evse_display::STATE_STARTING, 0, 0, 0, 0, 0, 0,
+                           evse_display::PANEL_SETPOINT, this->dark_mode_);
   } else {
     this->tft.fillScreen(TFT_BLACK);
     this->tft.setTextColor(TFT_WHITE);
@@ -92,6 +94,21 @@ void OpenEVSE::setup() {
 
   // Initialize heartbeat timer
   this->last_heartbeat_ = millis();
+
+  {
+    evse_display::LedState startup_led = {0, 0, 200, evse_display::LED_BREATHE, 1500};
+    portENTER_CRITICAL(&this->led_state_lock_);
+    this->led_state_ = startup_led;
+    portEXIT_CRITICAL(&this->led_state_lock_);
+  }
+
+  BaseType_t led_task_ok = xTaskCreatePinnedToCore(&OpenEVSE::led_task_entry_, "openevse_led",
+                                                   4096, this, 2, &this->led_task_handle_,
+                                                   tskNO_AFFINITY);
+  if (led_task_ok != pdPASS) {
+    this->led_task_handle_ = nullptr;
+    ESP_LOGE(TAG, "Failed to start LED animation task, falling back to loop-driven updates");
+  }
 }
 
 void OpenEVSE::loop() {
@@ -173,12 +190,16 @@ void OpenEVSE::loop() {
     this->update();
   }
 
-  // Update LED animation every loop iteration.
-  this->update_leds_();
+  if (this->led_task_handle_ == nullptr) {
+    this->update_leds_();
+  }
 }
 
 void OpenEVSE::update_leds_() {
-  auto &s = this->led_state_;
+  evse_display::LedState s;
+  portENTER_CRITICAL(&this->led_state_lock_);
+  s = this->led_state_;
+  portEXIT_CRITICAL(&this->led_state_lock_);
 
   float brightness = 0.0f;
   switch (s.anim) {
@@ -208,11 +229,31 @@ void OpenEVSE::update_leds_() {
   uint8_t g = (uint8_t)(s.g * brightness);
   uint8_t b = (uint8_t)(s.b * brightness);
 
+  if (this->last_led_color_.r == r && this->last_led_color_.g == g &&
+      this->last_led_color_.b == b) {
+    return;
+  }
+
+  if (!this->led_strip_.CanShow()) {
+    return;
+  }
+
+  this->last_led_color_ = {r, g, b};
   RgbColor color(r, g, b);
   for (int i = 0; i < LED_COUNT; i++) {
     this->led_strip_.SetPixelColor(i, color);
   }
   this->led_strip_.Show();
+}
+
+void OpenEVSE::led_task_entry_(void *arg) {
+  auto *self = static_cast<OpenEVSE *>(arg);
+  TickType_t last_wake = xTaskGetTickCount();
+
+  for (;;) {
+    self->update_leds_();
+    vTaskDelayUntil(&last_wake, LED_TASK_PERIOD_TICKS);
+  }
 }
 
 std::string OpenEVSE::parse_response_() {
@@ -672,6 +713,9 @@ void OpenEVSE::get_version() {
 // Add a new helper method after the parse_state_text_ method
 void OpenEVSE::update_state_sensors_(uint8_t evse_state, uint8_t pilot_state, uint16_t vflags) {
   this->evse_state_code_ = evse_state;
+  this->evse_enabled_ = (evse_state != 0xFE);
+  this->vehicle_connected_ = (vflags & ECVF_EV_CONNECTED) != 0;
+  this->charging_ = (vflags & ECVF_CHARGING_ON) != 0;
   // Update EVSE state sensor
   if (this->evse_state_sensor_ != nullptr) {
     this->evse_state_sensor_->publish_state(this->parse_state_text_(evse_state));
@@ -685,15 +729,15 @@ void OpenEVSE::update_state_sensors_(uint8_t evse_state, uint8_t pilot_state, ui
   // Update enable switch state based on EVSE state
   if (this->enable_switch_ != nullptr) {
     // State 0xFE is "Sleeping"
-    this->enable_switch_->publish_state(evse_state != 0xFE);
+    this->enable_switch_->publish_state(this->evse_enabled_);
   }
 
   // Update vehicle connected and charging sensors
   if (this->vehicle_connected_sensor_ != nullptr) {
-    this->vehicle_connected_sensor_->publish_state(vflags & ECVF_EV_CONNECTED);
+    this->vehicle_connected_sensor_->publish_state(this->vehicle_connected_);
   }
   if (this->charging_sensor_ != nullptr) {
-    this->charging_sensor_->publish_state(vflags & ECVF_CHARGING_ON);
+    this->charging_sensor_->publish_state(this->charging_);
   }
 }
 
@@ -1151,19 +1195,27 @@ void OpenEVSE::update_display() {
   if (this->elapsed_sensor_ && !std::isnan(this->elapsed_sensor_->get_state()))
     elapsed = (uint32_t)this->elapsed_sensor_->get_state();
 
+  auto panel_mode = evse_display::PANEL_SETPOINT;
+  if (this->vehicle_connected_ && !this->evse_enabled_) {
+    panel_mode = evse_display::PANEL_SURPLUS_WAIT;
+  } else if (this->vehicle_connected_ && this->evse_enabled_ && !this->charging_) {
+    panel_mode = evse_display::PANEL_VEHICLE_PAUSED;
+  }
+
   uint32_t dt = this->display_->update(state, setpoint, current, voltage,
-                                        power_kw, session_kwh, elapsed,
-                                        this->dark_mode_);
+                                       power_kw, session_kwh, elapsed,
+                                       panel_mode, this->dark_mode_);
 
   // Compute LED state from combined flags
-  bool evse_enabled = (this->enable_switch_ && this->enable_switch_->state);
-  bool vehicle_connected = (this->vehicle_connected_sensor_ && this->vehicle_connected_sensor_->state);
-  bool charging = (this->charging_sensor_ && this->charging_sensor_->state);
-  this->led_state_ = evse_display::EvseDisplay::compute_led(state, evse_enabled, vehicle_connected, charging);
+  evse_display::LedState next_led = evse_display::EvseDisplay::compute_led(
+      state, this->evse_enabled_, this->vehicle_connected_, this->charging_);
+  portENTER_CRITICAL(&this->led_state_lock_);
+  this->led_state_ = next_led;
+  portEXIT_CRITICAL(&this->led_state_lock_);
 
   // Backlight: HA-set brightness when active, off when sleeping/disabled + no car
   bool backlight_on = !((state == evse_display::STATE_SLEEPING || state == evse_display::STATE_DISABLED)
-                        && !vehicle_connected);
+                        && !this->vehicle_connected_);
   analogWrite(BACKLIGHT_PIN, backlight_on ? (int)(this->backlight_brightness_ * 255) : 0);
 
   if (state != this->last_evse_state_) {
@@ -1193,6 +1245,12 @@ esp_err_t OpenEVSE::handle_screenshot(httpd_req_t *req) {
   float session_kwh = std::isnan(this->energy_usage_kwh_) ? 0.0f : this->energy_usage_kwh_;
   uint32_t elapsed = this->elapsed_sensor_ ? (uint32_t)this->elapsed_sensor_->state : 0;
   bool dark = this->dark_mode_;
+  auto panel_mode = evse_display::PANEL_SETPOINT;
+  if (this->vehicle_connected_ && !this->evse_enabled_) {
+    panel_mode = evse_display::PANEL_SURPLUS_WAIT;
+  } else if (this->vehicle_connected_ && this->evse_enabled_ && !this->charging_) {
+    panel_mode = evse_display::PANEL_VEHICLE_PAUSED;
+  }
 
   // BMP header (54 bytes): 14-byte file header + 40-byte info header
   uint8_t hdr[54] = {};
@@ -1237,7 +1295,7 @@ esp_err_t OpenEVSE::handle_screenshot(httpd_req_t *req) {
 
     bool ok = this->display_->render_band(sprite, band_y, state, setpoint,
                                           current, voltage, power, session_kwh,
-                                          elapsed, dark);
+                                          elapsed, panel_mode, dark);
 
     uint16_t *px = ok ? (uint16_t *)sprite.getPointer() : nullptr;
     for (int row = 0; row < band_h; row++) {

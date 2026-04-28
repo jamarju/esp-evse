@@ -33,6 +33,12 @@ ESPHome-based firmware for OpenEVSE electric vehicle chargers with a TFT touchsc
 - `evse_display.{h,cpp}` — TFT_eSPI-based rendering with dark/light themes, RGB565 colors, sprite-based text to avoid flicker
 - Precompiled VLW fonts in `font_big.h`, `font_medium.h`, `font_small.h` (MonaspiceNe Nerd Font)
 - Font conversion: `uv run python scripts/ttf2vlw.py <input.ttf> <size> <output.h>` (custom converter with baseline fix)
+- Current font sources on this machine:
+  - Big font: `$HOME/Library/Fonts/MonaspiceNeNerdFont-Regular.otf` at `120px` on macOS
+  - Medium font: MonaspiceNe Nerd Font at `28px`
+  - Small font: MonaspiceNe Nerd Font at `24px`
+- Current big font regeneration command:
+  - `uv run scripts/ttf2vlw.py "$HOME/Library/Fonts/MonaspiceNeNerdFont-Regular.otf" 120 components/openevse/font_big.h --chars ' .0123456789A/'`
 
 ### Sensor/Control Components
 
@@ -40,4 +46,4 @@ Each control (current capacity, voltage, ammeter calibration, backlight, enable 
 
 ### NeoPixel LED Strip
 
-4 WS2812 LEDs on GPIO26 (RMT channel 0). Driven directly from C++ with state-aware color animations reflecting EVSE state.
+4 WS2812B-compatible LEDs on GPIO26. Driven directly from C++ with NeoPixelBus I2S1 WS2812x output and state-aware color animations reflecting EVSE state.

@@ -93,6 +93,12 @@ enum LedAnim : uint8_t {
   LED_BLINK_FAST,    // ~3Hz
 };
 
+enum MainPanelMode : uint8_t {
+  PANEL_SETPOINT,
+  PANEL_SURPLUS_WAIT,
+  PANEL_VEHICLE_PAUSED,
+};
+
 struct LedColor { uint8_t r, g, b; };
 
 struct LedState {
@@ -115,7 +121,8 @@ class EvseDisplay {
   // Returns render time in microseconds.
   uint32_t update(EvseState state, float setpoint_a, float current_a,
                   float voltage_v, float power_kw, float session_kwh,
-                  uint32_t elapsed_s, bool dark = true);
+                  uint32_t elapsed_s, MainPanelMode panel_mode,
+                  bool dark = true);
 
   // Render one horizontal band into a sprite for screenshot capture.
   // Sprite is created/deleted internally. Returns false on OOM.
@@ -123,7 +130,7 @@ class EvseDisplay {
   bool render_band(TFT_eSprite &sprite, int16_t band_y,
                    EvseState state, float setpoint_a, float current_a,
                    float voltage_v, float power_kw, float session_kwh,
-                   uint32_t elapsed_s, bool dark);
+                   uint32_t elapsed_s, MainPanelMode panel_mode, bool dark);
 
   // State helpers — public so callers can read LED color, text, etc.
   static const char *state_text(EvseState s);
@@ -158,7 +165,7 @@ class EvseDisplay {
   void draw_static_labels();
   void draw_dynamic(EvseState state, float setpoint_a, float current_a,
                     float voltage_v, float power_kw, float session_kwh,
-                    uint32_t elapsed_s);
+                    uint32_t elapsed_s, MainPanelMode panel_mode);
 };
 
 }  // namespace evse_display

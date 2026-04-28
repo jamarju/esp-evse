@@ -16,6 +16,8 @@
 #include <NeoPixelBus.h>
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include <esp_http_server.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #define ECF_L2                       0x0001 // service level 2
 #define ECF_DIODE_CHK_DISABLED       0x0002 // diode check disabled
@@ -120,6 +122,7 @@ class OpenEVSE : public Component {
   void get_settings();
   void update_display();
   void get_version();
+  static void led_task_entry_(void *arg);
 
   // Memory debugging
   void log_memory_usage(const char* location);
@@ -210,9 +213,12 @@ class OpenEVSE : public Component {
   static constexpr uint8_t BACKLIGHT_PIN = 27;
   static constexpr uint8_t LED_COUNT = 4;
   float backlight_brightness_{1.0f};  // 0.0-1.0, set from HA
-  NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2811Method> led_strip_{LED_COUNT, 26};
+  NeoPixelBus<NeoGrbFeature, NeoEsp32I2s1Ws2812xMethod> led_strip_{LED_COUNT, 26};
   evse_display::LedState led_state_{0, 0, 0, evse_display::LED_OFF, 0};
+  evse_display::LedColor last_led_color_{0, 0, 0};
   void update_leds_();
+  TaskHandle_t led_task_handle_{nullptr};
+  portMUX_TYPE led_state_lock_ = portMUX_INITIALIZER_UNLOCKED;
 
   bool screenshot_registered_{false};
   volatile bool screenshot_in_progress_{false};
@@ -220,6 +226,9 @@ class OpenEVSE : public Component {
   uint8_t evse_state_code_{0x00};
   uint8_t last_evse_state_{0x00};
   uint32_t last_command_time_{0};
+  bool evse_enabled_{false};
+  bool vehicle_connected_{false};
+  bool charging_{false};
   
   // Track startup phase
   StartupPhase startup_phase_{StartupPhase::INIT};

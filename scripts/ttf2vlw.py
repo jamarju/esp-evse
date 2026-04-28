@@ -21,7 +21,9 @@ def render_glyph(font: ImageFont.FreeTypeFont, char: str, ascent: int):
 
     # Render on a large canvas with known baseline position
     canvas_h = ascent * 3
-    canvas_w = advance + 40
+    # Nerd Font icon glyphs can be much wider than their nominal advance. Render
+    # on a generous canvas first, then store the corrected advance below.
+    canvas_w = max(advance + 40, font.size * 2)
     baseline_y = canvas_h // 2
 
     img = Image.new("L", (canvas_w, canvas_h), 0)
@@ -46,6 +48,12 @@ def render_glyph(font: ImageFont.FreeTypeFont, char: str, ascent: int):
     x1, y1, x2, y2 = bbox
     width = x2 - x1
     height = y2 - y1
+    dx = x1 - 10
+
+    # Some Nerd Font glyphs are visually much wider than their nominal advance.
+    # TFT_eSPI uses the VLW advance for layout/clearing, so widen the stored
+    # advance to cover the actual right edge of the rendered bitmap.
+    advance = max(advance, dx + width)
 
     # Crop to glyph bounds
     glyph_img = img.crop((x1, y1, x2, y2))
@@ -56,7 +64,7 @@ def render_glyph(font: ImageFont.FreeTypeFont, char: str, ascent: int):
         "height": height,
         "advance": advance,
         "dY": baseline_y - y1,  # distance from baseline to top of glyph (positive = above)
-        "dX": x1 - 10,         # left bearing (relative to render origin at x=10)
+        "dX": dx,              # left bearing (relative to render origin at x=10)
         "bitmap": bytes(glyph_img.getdata()),
     }
 
