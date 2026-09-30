@@ -160,6 +160,9 @@ class OpenEVSE : public Component {
   void publish_rapi_status_(const std::string &status);
   std::string normalize_raw_command_(const std::string &command) const;
   bool control_writes_ready_() const;
+  void process_pilot_resume_(uint32_t now);
+  void handle_pilot_resume_response_(const std::string &cmd, bool ok);
+  void cancel_pilot_resume_();
   bool read_line_();
   std::string parse_response_();
   text_sensor::TextSensor *evse_state_sensor_{nullptr};
@@ -229,6 +232,10 @@ class OpenEVSE : public Component {
   bool evse_enabled_{false};
   bool vehicle_connected_{false};
   bool charging_{false};
+  // One explicit B1 -> B2 transition per enable request; never use state F.
+  enum class PilotResumePhase : uint8_t { IDLE, WAIT_SLEEP, HOLD_B1, WAIT_STATE, WAIT_ENABLE };
+  PilotResumePhase pilot_resume_phase_{PilotResumePhase::IDLE};
+  uint32_t pilot_resume_at_{0};
   
   // Track startup phase
   StartupPhase startup_phase_{StartupPhase::INIT};

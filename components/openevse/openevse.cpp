@@ -153,6 +153,7 @@ void OpenEVSE::loop() {
     std::swap(this->command_queue_, empty);
     this->command_.clear();
     this->current_request_ = {};
+    this->cancel_pilot_resume_();
   }
 
   // Check for incoming messages
@@ -177,6 +178,8 @@ void OpenEVSE::loop() {
       this->send_next_command_in_queue_();
     }
   }
+
+  this->process_pilot_resume_(now);
 
   // Check if it's time to send a heartbeat
   if (now - this->last_heartbeat_ >= this->heartbeat_interval_ && this->startup_phase_ == StartupPhase::RUN) {
@@ -670,9 +673,95 @@ void OpenEVSE::enable_evse(bool enable) {
   }
 
   if (enable) {
-    this->queue_command_("FE"); // Enable EVSE
+    if (this->pilot_resume_phase_ != PilotResumePhase::IDLE) {
+      return; // Repeated HA requests must not restart the B1 dwell.
+    }
+    if (!this->charging_ && (this->evse_state_code_ == 0x02 ||
+        this->evse_state_code_ == 0xFE || this->evse_state_code_ == 0xFF)) {
+      // FE alone is a no-op when the AVR is already Connected. Explicitly
+      // enter Sleep/B1, then restore PWM only after the AVR acknowledges FS.
+      this->pilot_resume_phase_ = PilotResumePhase::WAIT_SLEEP;
+      if (!this->queue_command_("FS")) {
+        this->cancel_pilot_resume_();
+        return;
+      }
+      this->evse_enabled_ = true;
+      if (this->enable_switch_ != nullptr) {
+        this->enable_switch_->publish_state(true);
+      }
+    } else {
+      // Do not interrupt an existing charge or turn a fault into Sleep.
+      this->queue_command_("FE");
+    }
   } else {
+    this->cancel_pilot_resume_();
+    this->command_queue_.erase(std::remove_if(this->command_queue_.begin(), this->command_queue_.end(),
+        [](const QueuedCommand &request) { return request.command == "FE"; }), this->command_queue_.end());
     this->queue_command_("FS"); // Sleep EVSE
+  }
+}
+
+void OpenEVSE::cancel_pilot_resume_() {
+  if (this->pilot_resume_phase_ == PilotResumePhase::IDLE) {
+    return;
+  }
+  this->pilot_resume_phase_ = PilotResumePhase::IDLE;
+  this->command_queue_.erase(std::remove_if(this->command_queue_.begin(), this->command_queue_.end(),
+      [](const QueuedCommand &request) { return request.command == "FE"; }), this->command_queue_.end());
+  this->evse_enabled_ = (this->evse_state_code_ != 0xFE && this->evse_state_code_ != 0xFF);
+  if (this->enable_switch_ != nullptr) {
+    this->enable_switch_->publish_state(this->evse_enabled_);
+  }
+}
+
+void OpenEVSE::process_pilot_resume_(uint32_t now) {
+  if (this->pilot_resume_phase_ != PilotResumePhase::HOLD_B1 ||
+      static_cast<int32_t>(now - this->pilot_resume_at_) < 0) {
+    return;
+  }
+  // Obtain a fresh relay state after the dwell, not a pre-FS cached value.
+  if (this->queue_command_("GS")) {
+    this->pilot_resume_phase_ = PilotResumePhase::WAIT_STATE;
+  }
+}
+
+void OpenEVSE::handle_pilot_resume_response_(const std::string &cmd, bool ok) {
+  if (this->pilot_resume_phase_ == PilotResumePhase::IDLE) {
+    return;
+  }
+  if ((cmd == "FS" && this->pilot_resume_phase_ == PilotResumePhase::WAIT_SLEEP) ||
+      (cmd == "GS" && this->pilot_resume_phase_ == PilotResumePhase::WAIT_STATE) ||
+      (cmd == "FE" && this->pilot_resume_phase_ == PilotResumePhase::WAIT_ENABLE)) {
+    if (!ok) {
+      ESP_LOGW(TAG, "B1 -> B2 resume cancelled: %s rejected", cmd.c_str());
+      this->cancel_pilot_resume_();
+      return;
+    }
+    if (cmd == "FS") {
+      this->pilot_resume_phase_ = PilotResumePhase::HOLD_B1;
+      this->pilot_resume_at_ = millis() + 3000;
+      ESP_LOGI(TAG, "B1 -> B2 resume: holding B1 for at least 3 s");
+    } else if (cmd == "GS") {
+      if (this->evse_state_code_ != 0xFE) {
+        this->cancel_pilot_resume_(); // External control/fault takes precedence.
+      } else if (this->charging_) {
+        // AVR Sleep is graceful: wait for its relay to open before FE.
+        this->pilot_resume_phase_ = PilotResumePhase::HOLD_B1;
+        this->pilot_resume_at_ = millis() + 1000;
+      } else if (this->queue_command_("FE")) {
+        this->pilot_resume_phase_ = PilotResumePhase::WAIT_ENABLE;
+        ESP_LOGI(TAG, "B1 -> B2 resume: restoring PWM");
+      } else {
+        this->cancel_pilot_resume_();
+      }
+    } else {
+      this->pilot_resume_phase_ = PilotResumePhase::IDLE;
+      this->evse_enabled_ = true;
+      if (this->enable_switch_ != nullptr) {
+        this->enable_switch_->publish_state(true);
+      }
+      this->get_state();
+    }
   }
 }
 
@@ -713,7 +802,13 @@ void OpenEVSE::get_version() {
 // Add a new helper method after the parse_state_text_ method
 void OpenEVSE::update_state_sensors_(uint8_t evse_state, uint8_t pilot_state, uint16_t vflags) {
   this->evse_state_code_ = evse_state;
-  this->evse_enabled_ = (evse_state != 0xFE);
+  if (evse_state >= 0x04 && evse_state <= 0x0B) {
+    this->cancel_pilot_resume_();
+  }
+  // During the short B1 dwell, expose the accepted enable request to HA so
+  // its allocator does not mistake our internal transition for an off request.
+  this->evse_enabled_ = (evse_state != 0xFE && evse_state != 0xFF) ||
+      this->pilot_resume_phase_ != PilotResumePhase::IDLE;
   this->vehicle_connected_ = (vflags & ECVF_EV_CONNECTED) != 0;
   this->charging_ = (vflags & ECVF_CHARGING_ON) != 0;
   // Update EVSE state sensor
@@ -728,7 +823,7 @@ void OpenEVSE::update_state_sensors_(uint8_t evse_state, uint8_t pilot_state, ui
   
   // Update enable switch state based on EVSE state
   if (this->enable_switch_ != nullptr) {
-    // State 0xFE is "Sleeping"
+    // Sleeping and Disabled are off unless an explicit resume is in progress.
     this->enable_switch_->publish_state(this->evse_enabled_);
   }
 
@@ -768,10 +863,13 @@ void OpenEVSE::handle_response_(const std::string &response) {
     }
   }
   
-  if (cmd == "GS") {
+  if (cmd == "FS" || cmd == "FE") {
+    this->handle_pilot_resume_response_(cmd, tokens.size() == 1 && tokens[0] == "$OK");
+  } else if (cmd == "GS") {
     // Format: $OK evsestate elapsed pilotstate vflags
-    if (tokens.size() != 5) {
+    if (tokens.size() != 5 || tokens[0] != "$OK") {
       ESP_LOGE(TAG, "Invalid response length for $GS: %s", response.c_str());
+      this->handle_pilot_resume_response_(cmd, false);
       return;
     }
     
@@ -782,6 +880,7 @@ void OpenEVSE::handle_response_(const std::string &response) {
     
     // Update state sensors using the helper method
     this->update_state_sensors_(evse_state, pilot_state, vflags);
+    this->handle_pilot_resume_response_(cmd, true);
     
     // Update elapsed time sensor (specific to GS response)
     if (this->elapsed_sensor_ != nullptr) {
